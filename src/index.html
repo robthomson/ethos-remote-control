@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ethos Remote Control</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="18" height="13" rx="2.5"/><path d="M8 6 6 2.5M16 6l2-3.5"/><circle cx="8" cy="12.5" r="2"/><circle cx="16" cy="12.5" r="2"/></svg>
+      <span>Ethos Remote Control</span>
+    </div>
+    <div class="radio-info" id="radioInfo">No radio connected</div>
+    <div class="topbar-actions">
+      <span class="pill" id="statusPill" data-state="disconnected">Disconnected</span>
+      <button id="serialModeBtn" title="Ask the radio to switch its USB port to Serial mode">Switch USB to Serial</button>
+      <button id="connectBtn" class="primary">Connect</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="screen-area">
+      <div class="toolbar">
+        <label class="field">Display
+          <select id="displaySelect">
+            <option value="0">Main</option>
+            <option value="1">Top</option>
+          </select>
+        </label>
+        <label class="toggle"><input type="checkbox" id="liveToggle" checked> Live</label>
+        <span class="muted" id="fps"></span>
+        <span class="spacer"></span>
+        <button id="copyShotBtn" class="ghost" disabled>Copy</button>
+        <button id="saveShotBtn" class="ghost" disabled>Save PNG</button>
+      </div>
+
+      <div class="screen-wrap" id="screenWrap">
+        <canvas id="screen" width="800" height="480" tabindex="0"></canvas>
+        <div class="overlay" id="overlay">
+          <div class="overlay-card">
+            <div class="overlay-title" id="overlayTitle">Connect your radio</div>
+            <div class="overlay-text" id="overlayText">
+              Plug the radio in by USB with its USB mode set to <b>Serial</b>, then press <b>Connect</b>.
+            </div>
+            <div class="overlay-actions" id="overlayActions"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="keypad" id="keypad">
+        <div class="key-group">
+          <button class="key" data-key="SYS">SYS</button>
+          <button class="key" data-key="MDL">MDL</button>
+          <button class="key" data-key="DISP">DISP</button>
+        </div>
+        <div class="key-group">
+          <button class="key" data-key="PAGE">PAGE</button>
+          <button class="key" data-key="RTN">RTN</button>
+          <button class="key accent" data-key="ENTER">ENTER</button>
+        </div>
+        <div class="key-group dpad">
+          <button class="key" data-key="UP" title="Up">&#9650;</button>
+          <button class="key" data-key="LEFT" title="Left">&#9664;</button>
+          <button class="key" data-key="DOWN" title="Down">&#9660;</button>
+          <button class="key" data-key="RIGHT" title="Right">&#9654;</button>
+        </div>
+        <div class="key-group">
+          <button class="key" data-wheel="-1" title="Rotary encoder: turn left">&#10226; Wheel</button>
+          <button class="key" data-wheel="1" title="Rotary encoder: turn right">Wheel &#10227;</button>
+        </div>
+      </div>
+      <div class="hint">Click the screen to tap, drag to swipe, hold or right-click to long-press, scroll to turn the wheel. Hold a key button for a long press.</div>
+    </section>
+
+    <aside class="side">
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-tab="controls" class="active">Controls</button>
+        <button role="tab" data-tab="files">Files</button>
+        <button role="tab" data-tab="channels">Channels</button>
+        <button role="tab" data-tab="log">Log</button>
+      </nav>
+
+      <div class="panel active" data-panel="controls">
+        <h3>Trims</h3>
+        <div class="trims" id="trims"></div>
+
+        <h3>Function switches</h3>
+        <div class="fswitches" id="fswitches"></div>
+
+        <h3>Type text</h3>
+        <form class="text-entry" id="textForm">
+          <input id="textInput" placeholder="Text for the on-screen keyboard" autocomplete="off">
+          <button type="submit">Send</button>
+        </form>
+
+        <h3>Options</h3>
+        <label class="toggle"><input type="checkbox" id="invertWheel"> Invert scroll wheel direction</label>
+        <div class="row">
+          <span class="muted">Radio USB mode</span>
+          <button id="usbSerialBtn2" class="ghost">Serial</button>
+          <button id="usbStorageBtn" class="ghost">Storage</button>
+        </div>
+
+        <h3>Keyboard shortcuts</h3>
+        <table class="shortcuts">
+          <tr><td><kbd>&uarr;</kbd> <kbd>&darr;</kbd> <kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>Turn the wheel</td></tr>
+          <tr><td><kbd>Shift</kbd> + arrows</td><td>UP / DOWN / LEFT / RIGHT keys</td></tr>
+          <tr><td><kbd>Enter</kbd></td><td>ENTER</td></tr>
+          <tr><td><kbd>Esc</kbd> <kbd>Backspace</kbd></td><td>RTN</td></tr>
+          <tr><td><kbd>Tab</kbd> <kbd>PgDn</kbd></td><td>PAGE</td></tr>
+          <tr><td><kbd>F1</kbd> <kbd>F2</kbd> <kbd>F3</kbd></td><td>SYS / MDL / DISP</td></tr>
+          <tr><td colspan="2" class="muted">Hold a key for a long press.</td></tr>
+        </table>
+      </div>
+
+      <div class="panel" data-panel="files">
+        <div class="files-bar">
+          <button id="filesUpBtn" class="ghost" title="Parent folder">&uarr;</button>
+          <span class="path" id="filesPath">/</span>
+          <button id="filesRefreshBtn" class="ghost">Refresh</button>
+          <button id="filesUploadBtn" class="ghost">Upload</button>
+          <input type="file" id="filesUploadInput" multiple hidden>
+        </div>
+        <div class="progress" id="filesProgress" hidden><div></div></div>
+        <ul class="file-list" id="fileList"></ul>
+      </div>
+
+      <div class="panel" data-panel="channels">
+        <p class="note">Experimental: channel outputs have not been tried on a physical radio yet. Values are raw (&plusmn;1024 is assumed to be &plusmn;100%).</p>
+        <div class="channels" id="channels"></div>
+      </div>
+
+      <div class="panel" data-panel="log">
+        <div class="row">
+          <span class="muted">Radio log and app events</span>
+          <span class="spacer"></span>
+          <button id="logClearBtn" class="ghost">Clear</button>
+        </div>
+        <pre class="log" id="log"></pre>
+      </div>
+    </aside>
+  </main>
+
+  <div class="toasts" id="toasts"></div>
+</body>
+</html>

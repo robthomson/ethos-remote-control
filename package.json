@@ -1,0 +1,58 @@
+{
+  "name": "ethos-remote-control",
+  "productName": "Ethos Remote Control",
+  "version": "0.1.0",
+  "description": "Control an FrSky Ethos radio from the PC over USB",
+  "author": "Rob Thomson",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "node scripts/start.js",
+    "test": "node --test test/*.test.js",
+    "postinstall": "node node_modules/electron/install.js",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.rt-rc.ethos-remote-control",
+    "productName": "Ethos Remote Control",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "src/**/*"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "artifactName": "Ethos-Remote-Control-${version}-${os}-${arch}-setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "Ethos-Remote-Control-${version}-${os}-${arch}-portable.${ext}"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.utilities",
+      "artifactName": "Ethos-Remote-Control-${version}-${os}-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "tar.gz"
+      ],
+      "category": "Utility",
+      "artifactName": "Ethos-Remote-Control-${version}-${os}-${arch}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "45.2.1",
+    "electron-builder": "26.18.0"
+  }
+}

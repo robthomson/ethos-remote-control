@@ -1,0 +1,80 @@
+name: Build
+
+# Reusable build, called by push.yml, pr.yml, snapshot.yml and release.yml.
+# Each runner builds natively for its own OS and CPU, and uploads one artifact per platform.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version written into package.json (and so into the file names)
+        required: true
+        type: string
+
+jobs:
+  build-app:
+    name: Build (${{ matrix.os_name }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+            os_name: windows
+            arch: x64
+          - runner: macos-15-intel
+            os_name: macos
+            arch: x64
+          - runner: macos-14
+            os_name: macos
+            arch: arm64
+          - runner: ubuntu-latest
+            os_name: linux
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            os_name: linux
+            arch: arm64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      # npm pkg set edits the field directly; `npm version` would refuse a dirty tree
+      - name: Set package version
+        shell: bash
+        run: npm pkg set version="${{ inputs.version }}"
+
+      # No signing certificates: Windows and macOS builds are unsigned.
+      # --publish never: electron-builder would otherwise try to publish on tag builds.
+      - name: Build + package (electron-builder)
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish never
+
+      - name: List build output
+        shell: bash
+        run: ls -la release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ethos-remote-control-${{ inputs.version }}-${{ matrix.os_name }}-${{ matrix.arch }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.AppImage
+            release/*.tar.gz
+          if-no-files-found: error

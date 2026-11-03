@@ -1,0 +1,59 @@
+name: Snapshot
+
+# Push a snapshot/<version> tag (for example snapshot/0.0.1) to build every platform and
+# publish a GitHub pre-release. Notes come from the matching section in Releases.md.
+
+on:
+  push:
+    tags:
+      - 'snapshot/*'
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#snapshot/}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  create-snapshot:
+    name: Create Snapshot Release
+    runs-on: ubuntu-latest
+    needs: [version, build]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la ./dist
+
+      - name: Create snapshot notes
+        run: |
+          python3 .github/scripts/extract-release-notes.py "${{ needs.version.outputs.version }}" Releases.md > Notes.md
+          cat Notes.md
+
+      - name: Create snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --prerelease --notes-file Notes.md \
+            -t "Ethos Remote Control - Snapshot ${{ needs.version.outputs.version }}" \
+            dist/*
