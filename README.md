@@ -4,9 +4,10 @@ A desktop app for Windows, macOS and Linux that controls an FrSky Ethos radio fr
 
 - **Live screen** mirrored from the radio. Click to tap, drag to swipe, hold or right-click to long-press, scroll to turn the rotary encoder.
 - **Keys**: SYS, MDL, DISP, PAGE, RTN, ENTER and the arrows, on screen or from the keyboard. Hold a key for a long press.
-- **Trims** with live values, **function switches** FS1–FS6, and **text entry** for the on-screen keyboard.
-- **Files**: browse the radio's storage, download, upload (button or drag and drop), delete, and load model files.
-- **Channels** monitor (experimental) and the radio's **log**.
+- **Trims** with live values, **function switches** that light up when on, live **switch positions**, and **text entry** for the on-screen keyboard.
+- **Files**: browse the radio's storage and SD card, download, upload (button or drag and drop), create folders, delete, load model files, and reload the Lua scripts after an upload.
+- **Channels** monitor and the radio's **log**.
+- Flight mode, RF and backlight state, and a **Wake** button to turn the radio screen back on.
 - Save or copy screenshots as PNG.
 - Switch the radio's USB mode between Serial and Storage without touching it.
 
@@ -15,6 +16,7 @@ It uses the Ethos remote control protocol described in [ethos-tools/simulation/r
 ## Requirements
 
 - A radio running **Ethos 26 from the nightly builds of 2026-10-16 or later**, connected by USB.
+- The app speaks remote protocol versions 6 to 11 and adapts to the radio. Newer nightlies add: Lua reload (7), timed touches and function switches as keys (9), new folders (10), live switches, function switch states and their reset (11).
 - Developed against an X20S.
 
 ## Using it

@@ -1,4 +1,4 @@
-import { RadioClient, STATUS, statusText } from './protocol.js';
+import { LONG_TOUCH_MS, RadioClient, STATUS, statusText } from './protocol.js';
 import { SerialTransport, findPort, switchUsbMode, waitForPort } from './usb.js';
 
 const $ = (id) => document.getElementById(id);
@@ -28,6 +28,9 @@ const ui = {
   filesProgress: $('filesProgress'),
   channels: $('channels'),
   invertWheel: $('invertWheel'),
+  radioState: $('radioState'),
+  switches: $('switches'),
+  driveSelect: $('driveSelect'),
 };
 const ctx = ui.canvas.getContext('2d');
 
@@ -61,7 +64,7 @@ function log(text, kind = '') {
   const line = document.createElement('span');
   if (kind) line.className = kind;
   const time = new Date().toLocaleTimeString([], { hour12: false });
-  line.textContent = `${time} ${text.replace(/\n+$/, '')}\n`;
+  line.textContent = `${time} ${text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/[\r\n]+$/, '')}\n`;
   const atBottom = ui.log.scrollTop + ui.log.clientHeight >= ui.log.scrollHeight - 4;
   ui.log.append(line);
   while (ui.log.childNodes.length > 2000) ui.log.firstChild.remove();
@@ -86,7 +89,8 @@ const hideOverlay = () => { ui.overlay.hidden = true; };
 function showDisconnectedOverlay() {
   showOverlay('Connect your radio',
     'Plug the radio in by USB with its USB mode set to <b>Serial</b>, then press <b>Connect</b>.<br><br>' +
-    'Remote control needs Ethos 26 (nightly from 2026-10-16 or later).',
+    'Remote control needs Ethos 26 (nightly from 2026-10-16 or later); a current nightly adds live switches, ' +
+    'function switch states, new folders and Lua reload.',
     [{ label: 'Connect', onClick: connect, primary: true }]);
 }
 
@@ -112,7 +116,11 @@ function setState(state) {
   const connected = state === 'connected';
   document.querySelectorAll('[data-needs-radio]').forEach((el) => { el.disabled = !connected; });
   ui.saveShotBtn.disabled = ui.copyShotBtn.disabled = !hasFrame;
-  if (state === 'disconnected') ui.radioInfo.textContent = 'No radio connected';
+  if (state === 'disconnected') {
+    ui.radioInfo.textContent = 'No radio connected';
+    ui.radioState.textContent = '';
+    ui.driveSelect.hidden = true;
+  }
 }
 
 const isConnected = () => ui.statusPill.dataset.state === 'connected';
@@ -146,7 +154,8 @@ async function openPort(port) {
 
   client = new RadioClient(transport);
   client.addEventListener('log', (e) => log(e.detail));
-  client.addEventListener('state', (e) => log(`[state] ${[...e.detail].map((b) => b.toString(16).padStart(2, '0')).join(' ')}`, 'app'));
+  client.addEventListener('state', (e) => renderState(e.detail));
+  client.addEventListener('controls', (e) => renderControls(e.detail));
   client.addEventListener('hello', (e) => showRadioInfo(e.detail));
   transport.onClose = () => onClosed();
 
@@ -172,6 +181,38 @@ async function openPort(port) {
     }
     await disconnect();
   }
+}
+
+let lastState = '';
+function renderState({ flightMode, rfActive, backlightOn }) {
+  const text = `FM${flightMode}  ·  RF ${rfActive ? 'on' : 'off'}${backlightOn ? '' : '  ·  screen off'}`;
+  ui.radioState.textContent = text;
+  ui.radioState.classList.toggle('warn', rfActive);
+  ui.radioState.title = rfActive ? 'The RF module is transmitting: a bound model reacts to what you do here' : '';
+  if (text !== lastState) log(`Radio state: ${text.replace(/\s+·\s+/g, ', ')}`, 'app');
+  lastState = text;
+}
+
+/** Controls pushed by the radio when they change (protocol version 11). */
+function renderControls({ switches, trims, functionSwitches }) {
+  renderTrims(trims);
+  renderFunctionSwitches(functionSwitches);
+  ui.switches.replaceChildren(...switches.map(({ name, position }) => {
+    const chip = document.createElement('span');
+    chip.className = 'switch';
+    chip.dataset.position = position;
+    chip.textContent = `${name} ${position < 0 ? '\u2191' : position > 0 ? '\u2193' : '\u2013'}`;
+    chip.title = `${name}: ${position < 0 ? 'up' : position > 0 ? 'down' : 'middle'}`;
+    return chip;
+  }));
+  $('switchesSection').hidden = !switches.length;
+}
+
+/** Tells the user when the radio's firmware is too old for a feature. */
+function supports(version, what) {
+  if (client && client.protocol >= version) return true;
+  toast(`${what} needs a newer Ethos nightly (remote protocol ${version}, this radio has ${client?.protocol ?? '?'})`, 'err');
+  return false;
 }
 
 function showRadioInfo(hello) {
@@ -246,7 +287,15 @@ function startLoops() {
   const token = ++loopToken;
   screenLoop(token);
   valuesLoop(token);
+  loadDrives(token);
   if (activeTab === 'files') listFiles();
+}
+
+async function loadDrives(token) {
+  const drives = await client.drives();
+  if (token !== loopToken) return;
+  ui.driveSelect.replaceChildren(...drives.map(({ name, path }) => new Option(name, path)));
+  ui.driveSelect.hidden = drives.length < 2;
 }
 
 async function screenLoop(token) {
@@ -287,7 +336,10 @@ async function screenLoop(token) {
 
 async function valuesLoop(token) {
   while (token === loopToken && client) {
-    if (!document.hidden && activeTab === 'controls') {
+    if (activeTab === 'controls' && client.controls) {
+      // The radio sends the trims itself when they change (protocol version 11)
+      await sleep(300);
+    } else if (!document.hidden && activeTab === 'controls') {
       const { status, trims } = await client.trims();
       if (token !== loopToken) return;
       if (status === 0) renderTrims(trims);
@@ -357,7 +409,8 @@ function ripple(event, long = false) {
 async function send(action) {
   if (!isConnected()) return;
   const status = await action(client);
-  if (status && status !== STATUS.SUCCESS) toast(`The radio answered: ${statusText(status)}`, 'err');
+  if (status === STATUS.WOKE_UP) toast('The radio screen was off: that input turned it back on');
+  else if (status && status !== STATUS.SUCCESS) toast(`The radio answered: ${statusText(status)}`, 'err');
 }
 
 let pointerStart = null;
@@ -378,7 +431,7 @@ ui.canvas.addEventListener('pointerup', (event) => {
   } else {
     const long = performance.now() - start.time >= 500;
     ripple(event, long);
-    send((c) => c.touch(start.x, start.y, long));
+    send((c) => c.touch(start.x, start.y, long ? LONG_TOUCH_MS : 20));
   }
 });
 ui.canvas.addEventListener('pointercancel', () => { pointerStart = null; });
@@ -387,7 +440,7 @@ ui.canvas.addEventListener('contextmenu', (event) => {
   if (!isConnected()) return;
   const { x, y } = radioPoint(event);
   ripple(event, true);
-  send((c) => c.touch(x, y, true));
+  send((c) => c.touch(x, y, LONG_TOUCH_MS));
 });
 
 let wheelAccumulator = 0;
@@ -529,13 +582,32 @@ function renderTrims(values) {
 }
 ui.trims.innerHTML = '<p class="muted">Shown once a radio is connected.</p>';
 
-for (let i = 1; i <= 6; i++) {
-  const button = document.createElement('button');
-  button.textContent = `FS${i}`;
-  button.dataset.needsRadio = '';
-  bindHoldButton(button, (hold) => send((c) => c.pressFunctionSwitch(i, hold)));
-  ui.fswitches.append(button);
+/** One button per function switch, lit when the radio reports it on. */
+function renderFunctionSwitches(states) {
+  if (ui.fswitches.children.length !== states.length) {
+    ui.fswitches.replaceChildren(...states.map((_, index) => {
+      const button = document.createElement('button');
+      button.textContent = `FS${index + 1}`;
+      button.dataset.needsRadio = '';
+      button.disabled = !isConnected();
+      bindHoldButton(button, (hold) => send((c) => c.pressFunctionSwitch(index + 1, hold)));
+      return button;
+    }));
+  }
+  states.forEach((on, i) => ui.fswitches.children[i].classList.toggle('on', on));
 }
+renderFunctionSwitches(new Array(6).fill(false));
+
+$('fsResetBtn').addEventListener('click', () => {
+  if (supports(11, 'Resetting the function switches')) send((c) => c.resetFunctionSwitches());
+});
+$('wakeBtn').addEventListener('click', () => send((c) => c.resetBacklightTimer()));
+$('reloadBtn').addEventListener('click', async () => {
+  if (!isConnected() || !supports(7, 'Reloading the Lua scripts')) return;
+  const status = await client.reload('scripts');
+  if (status) toast(`Could not reload the Lua scripts: ${statusText(status)}`, 'err');
+  else toast('Lua scripts reloaded', 'ok');
+});
 
 $('textForm').addEventListener('submit', (event) => {
   event.preventDefault();
@@ -575,7 +647,10 @@ ui.channels.innerHTML = '<p class="muted">Shown once a radio is connected.</p>';
 let cwd = '/';
 let currentFiles = [];
 const joinPath = (dir, name) => (dir.endsWith('/') ? dir + name : `${dir}/${name}`);
-const parentPath = (dir) => dir.replace(/\/[^/]+\/?$/, '') || '/';
+const parentPath = (dir) => {
+  const parent = dir.replace(/\/[^/]+\/?$/, '');
+  return /^([A-Za-z]+:)?$/.test(parent) ? `${parent}/` : parent;
+};
 
 const ICON_DIR = '<svg class="icon" viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>';
 const ICON_FILE = '<svg class="icon" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>';
@@ -601,7 +676,8 @@ async function listFiles(path = cwd) {
   ui.filesPath.textContent = cwd;
   ui.filesPath.title = cwd;
   files.sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name, undefined, { numeric: true }));
-  const rows = files.filter((f) => f.name !== '.' && f.name !== '..').map(fileRow);
+  if ([...ui.driveSelect.options].some((o) => o.value === 'SD:/')) ui.driveSelect.value = /^SD:/i.test(cwd) ? 'SD:/' : '/';
+  const rows = files.map(fileRow);
   ui.fileList.replaceChildren(...(rows.length ? rows : [Object.assign(document.createElement('li'), { className: 'empty', textContent: 'Empty folder' })]));
 }
 
@@ -623,6 +699,7 @@ function fileRow(file) {
   };
   if (file.dir) {
     li.addEventListener('click', () => listFiles(path));
+    action('Delete', () => deleteFile(path, true), 'danger');
   } else {
     if (/^\/models\/.+\.bin$/i.test(path)) action('Load', () => loadModel(path));
     action('Download', () => downloadFile(path, file.name));
@@ -642,10 +719,10 @@ async function downloadFile(path, name) {
   download(new Blob([data]), name);
 }
 
-async function deleteFile(path) {
-  if (!isConnected() || !confirm(`Delete ${path} from the radio?`)) return;
+async function deleteFile(path, isFolder = false) {
+  if (!isConnected() || !confirm(`Delete ${isFolder ? 'the folder ' : ''}${path} from the radio?`)) return;
   const status = await client.deleteFile(path);
-  if (status) toast(`Could not delete ${path}: ${statusText(status)}`, 'err');
+  if (status) toast(`Could not delete ${path}: ${statusText(status)}${isFolder ? ' (only an empty folder can be deleted)' : ''}`, 'err');
   else toast(`Deleted ${path}`, 'ok');
   listFiles();
 }
@@ -680,6 +757,34 @@ async function uploadFiles(fileList) {
   listFiles();
 }
 
+async function createFolder(name) {
+  if (!isConnected() || !supports(10, 'Creating a folder')) return;
+  const path = joinPath(cwd, name);
+  const status = await client.createDirectory(path);
+  if (status) toast(`Could not create ${path}: ${statusText(status)}`, 'err');
+  else toast(`Created ${path}`, 'ok');
+  listFiles();
+}
+
+// window.prompt() does not exist in Electron: the name is typed in a small form
+const folderForm = $('newFolderForm');
+$('filesNewFolderBtn').addEventListener('click', () => {
+  folderForm.hidden = !folderForm.hidden;
+  if (!folderForm.hidden) $('newFolderName').focus();
+});
+folderForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const name = $('newFolderName').value.trim();
+  if (!name || /[\\/:*?"<>|]/.test(name)) {
+    toast('Give the folder a name without \\ / : * ? " < > |', 'err');
+    return;
+  }
+  $('newFolderName').value = '';
+  folderForm.hidden = true;
+  createFolder(name);
+});
+ui.driveSelect.addEventListener('change', () => listFiles(ui.driveSelect.value));
+
 $('filesUpBtn').addEventListener('click', () => listFiles(parentPath(cwd)));
 $('filesRefreshBtn').addEventListener('click', () => listFiles());
 $('filesUploadBtn').addEventListener('click', () => $('filesUploadInput').click());
@@ -687,7 +792,7 @@ $('filesUploadInput').addEventListener('change', (event) => {
   uploadFiles([...event.target.files]);
   event.target.value = '';
 });
-['filesUpBtn', 'filesRefreshBtn', 'filesUploadBtn'].forEach((id) => { $(id).dataset.needsRadio = ''; });
+['filesUpBtn', 'filesRefreshBtn', 'filesUploadBtn', 'filesNewFolderBtn', 'reloadBtn', 'fsResetBtn', 'wakeBtn'].forEach((id) => { $(id).dataset.needsRadio = ''; });
 ui.fileList.innerHTML = '<li class="empty">Connect a radio to browse its files</li>';
 
 // Dropping files on the file list uploads them

@@ -1,15 +1,18 @@
-// Ethos remote control protocol (protocol version 6), as spoken by the radio's USB serial port.
+// Ethos remote control protocol (protocol versions 6 to 11), as spoken by the radio's USB serial port.
 // Reference: ethos-tools/simulation/radio_remote.md and radio_remote.py.
 
 import { decodeTiles } from './qoi.js';
 
 export const SYNC = 0xE7;
 export const MAX_PAYLOAD = 1024;
-export const PROTOCOL_VERSION = 6;
+// 7: reload, 9: function switches pressed with PRESS and TOUCH takes a duration, 10: createDirectory,
+// 11: version suffix in HELLO, EVENT.CONTROLS, resetFunctionSwitches. The radio answers HELLO with its own version.
+export const PROTOCOL_VERSION = 11;
 
 export const CMD = {
   HELLO: 0x01,
-  PRESS_KEY: 0x10,
+  PRESS: 0x10,
+  PRESS_KEY: 0x10, // its name before version 9
   TOUCH: 0x11,
   SWIPE: 0x12,
   TURN_ROTARY_ENCODER: 0x13,
@@ -22,26 +25,33 @@ export const CMD = {
   READ_FILE: 0x31,
   WRITE_FILE: 0x32,
   DELETE_FILE: 0x33,
+  CREATE_DIRECTORY: 0x34,
   LOAD_MODEL: 0x40,
+  RELOAD: 0x41,
   CHANNELS_OUTPUTS: 0x50,
   TRIMS: 0x51,
+  RESET_FUNCTION_SWITCHES: 0x53,
 };
 
-export const EVENT = { STATE: 0xC1, CONNECTION: 0xC2, LOG: 0xC3 };
+export const EVENT = { STATE: 0xC1, CONNECTION: 0xC2, LOG: 0xC3, CONTROLS: 0xC4 };
 
 export const STATUS = {
   SUCCESS: 0, UNSUPPORTED: -1, REFUSED: -2, INVALID: -3, IO_ERROR: -4, BUSY: -5, TIMEOUT: -6,
+  WOKE_UP: -7, // the screen was off: the input only turned it back on
 };
 
 const STATUS_TEXT = {
   0: 'success', [-1]: 'unsupported', [-2]: 'refused', [-3]: 'invalid argument',
-  [-4]: 'I/O error', [-5]: 'busy', [-6]: 'timeout',
+  [-4]: 'I/O error', [-5]: 'busy', [-6]: 'timeout', [-7]: 'woke up',
 };
 
 export const statusText = (status) => STATUS_TEXT[status] ?? `status ${status}`;
 
 export const KEYS = ['SYS', 'MDL', 'DISP', 'PAGE', 'RTN', 'ENTER', 'UP', 'DOWN', 'LEFT', 'RIGHT'];
 export const DISPLAYS = { main: 0, top: 1, glasses: 2 };
+export const RELOAD = { scripts: 0x01, all: 0xFF };
+export const LONG_TOUCH_MS = 1000; // from this duration a touch is a long press
+const SWITCH_NOT_INSTALLED = -128;
 
 /** CRC-16/XMODEM: polynomial 0x1021, initial value 0. */
 export function crc16(bytes) {
@@ -129,6 +139,7 @@ export class Reader {
   }
   atEnd() { return this.pos >= this.data.length; }
   u8() { return this.view.getUint8(this.pos++); }
+  i8() { return this.view.getInt8(this.pos++); }
   i16() { const v = this.view.getInt16(this.pos, true); this.pos += 2; return v; }
   u32() { const v = this.view.getUint32(this.pos, true); this.pos += 4; return v; }
   string() {
@@ -146,7 +157,8 @@ export class Reader {
  * Talks to a radio over a transport: { write(Uint8Array): Promise, onData: (Uint8Array) => void }.
  * Requests run one at a time; `priority` requests (user input) go ahead of queued ones (screenshots).
  *
- * Events: 'log' (detail: text), 'state' (detail: Uint8Array), 'accepted', 'refused'.
+ * Events: 'log' (detail: text), 'state' (detail: { flightMode, rfActive, backlightOn }),
+ * 'controls' (detail: { switches, trims, functionSwitches }), 'hello', 'accepted', 'refused'.
  */
 export class RadioClient extends EventTarget {
   constructor(transport) {
@@ -162,6 +174,9 @@ export class RadioClient extends EventTarget {
     this.accepted = false;
     this.refused = false;
     this.hello = null;
+    this.state = null;
+    this.controls = null;
+    this.localVolume = null;
     this.screens = new Map();
     this.channels = [];
   }
@@ -174,7 +189,14 @@ export class RadioClient extends EventTarget {
       } else if (command === EVENT.LOG) {
         this.dispatchEvent(new CustomEvent('log', { detail: decoder.decode(payload) }));
       } else if (command === EVENT.STATE) {
-        this.dispatchEvent(new CustomEvent('state', { detail: payload }));
+        if (payload.length < 3) return;
+        this.state = { flightMode: payload[0], rfActive: !!payload[1], backlightOn: !!payload[2] };
+        this.dispatchEvent(new CustomEvent('state', { detail: this.state }));
+      } else if (command === EVENT.CONTROLS) {
+        const controls = parseControls(payload);
+        if (!controls) return;
+        this.controls = controls;
+        this.dispatchEvent(new CustomEvent('controls', { detail: controls }));
       }
       return;
     }
@@ -240,6 +262,9 @@ export class RadioClient extends EventTarget {
     hello.board = r.atEnd() ? '' : r.string();
     hello.region = r.atEnd() ? '' : r.string();
     hello.gitHash = r.atEnd() ? '' : r.string();
+    // Since version 11, the version suffix (RC11...), empty for a release
+    const suffix = r.atEnd() ? '' : r.string();
+    if (suffix) hello.firmware += `-${suffix}`;
     this.hello = hello;
     this.dispatchEvent(new CustomEvent('hello', { detail: hello }));
 
@@ -292,16 +317,22 @@ export class RadioClient extends EventTarget {
 
   // ----- Input -----
 
+  get protocol() { return this.hello?.protocol ?? 0; }
+
+  /** Key (SYS...), trim (T1+...) or, since version 9, function switch (FS1...). 540 ms or more is a long press. */
   async pressKey(key, holdMs = 100) {
-    return (await this.request(CMD.PRESS_KEY, concat(u32(holdMs), cstr(key)), { priority: true })).status;
+    return (await this.request(CMD.PRESS, concat(u32(holdMs), cstr(key)), { priority: true })).status;
   }
 
   async pressFunctionSwitch(index, holdMs = 100) {
-    return (await this.request(CMD.PRESS_FUNCTION_SWITCH, concat(u32(holdMs), cstr(`FS${index}`)), { priority: true })).status;
+    const command = this.protocol >= 9 ? CMD.PRESS : CMD.PRESS_FUNCTION_SWITCH;
+    return (await this.request(command, concat(u32(holdMs), cstr(`FS${index}`)), { priority: true })).status;
   }
 
-  async touch(x, y, longPress = false) {
-    return (await this.request(CMD.TOUCH, concat(u16(x), u16(y), u8(longPress ? 1 : 0)), { priority: true })).status;
+  /** Since version 9 the touch lasts `ms`; before, it is a tap or a long press (from LONG_TOUCH_MS). */
+  async touch(x, y, ms = 20) {
+    const tail = this.protocol >= 9 ? u32(ms) : u8(ms >= LONG_TOUCH_MS ? 1 : 0);
+    return (await this.request(CMD.TOUCH, concat(u16(x), u16(y), tail), { priority: true })).status;
   }
 
   async swipe(x1, y1, x2, y2) {
@@ -316,25 +347,68 @@ export class RadioClient extends EventTarget {
     return (await this.request(CMD.ENTER_TEXT, cstr(text), { priority: true })).status;
   }
 
+  /** Turns the screen back on. */
+  async resetBacklightTimer() {
+    return (await this.request(CMD.RESET_BACKLIGHT_TIMER, new Uint8Array(), { priority: true })).status;
+  }
+
+  /** All the function switches of the current model off (version 11). */
+  async resetFunctionSwitches() {
+    if (this.protocol < 11) return STATUS.UNSUPPORTED;
+    return (await this.request(CMD.RESET_FUNCTION_SWITCHES, new Uint8Array(), { priority: true })).status;
+  }
+
+  /** Reloads the Lua scripts, or everything (version 7). */
+  async reload(what = 'scripts') {
+    if (this.protocol < 7) return STATUS.UNSUPPORTED;
+    return (await this.request(CMD.RELOAD, u8(RELOAD[what]), { timeout: 15000, priority: true })).status;
+  }
+
   // ----- Files -----
 
+  /**
+   * Path as the radio wants it: "/x" is on the local storage, "SD:/x" on the SD card. Radios with
+   * volumes name the local storage "RADIO:".
+   */
+  async radioPath(path) {
+    if (/^[A-Za-z]+:/.test(path)) return path;
+    if (this.localVolume === null) {
+      const { status } = await this.request(CMD.LIST_FILES, cstr('RADIO:/'), { timeout: 10000, priority: true });
+      this.localVolume = status === STATUS.SUCCESS ? 'RADIO:' : '';
+    }
+    return `${this.localVolume}/${path.replace(/^\/+/, '')}`;
+  }
+
+  /** The storages to browse: the local one, and the SD card on the radios that have both. */
+  async drives() {
+    const drives = [{ name: 'Radio', path: '/' }];
+    await this.radioPath('/');
+    if (this.localVolume) {
+      const { status } = await this.request(CMD.LIST_FILES, cstr('SD:/'), { timeout: 10000, priority: true });
+      if (status === STATUS.SUCCESS) drives.push({ name: 'SD card', path: 'SD:/' });
+    }
+    return drives;
+  }
+
   async listFiles(path) {
-    const { status, data } = await this.request(CMD.LIST_FILES, cstr(path), { timeout: 10000, priority: true });
+    const { status, data } = await this.request(CMD.LIST_FILES, cstr(await this.radioPath(path)), { timeout: 10000, priority: true });
     const files = [];
     const r = new Reader(data);
     while (status === 0 && !r.atEnd()) {
       const dir = r.u8() !== 0;
       const size = r.u32();
-      files.push({ name: r.string(), dir, size });
+      const name = r.string();
+      if (name !== '.' && name !== '..') files.push({ name, dir, size });
     }
     return { status, files };
   }
 
   async readFile(path) {
-    return this.request(CMD.READ_FILE, concat(u32(0), cstr(path)), { timeout: 120000, priority: true });
+    return this.request(CMD.READ_FILE, concat(u32(0), cstr(await this.radioPath(path))), { timeout: 120000, priority: true });
   }
 
   async writeFile(path, data, onProgress) {
+    path = await this.radioPath(path);
     const header = u32(0).length + cstr(path).length;
     const room = MAX_PAYLOAD - header;
     let offset = 0;
@@ -348,8 +422,15 @@ export class RadioClient extends EventTarget {
     return STATUS.SUCCESS;
   }
 
+  /** Deletes a file, or an empty folder. */
   async deleteFile(path) {
-    return (await this.request(CMD.DELETE_FILE, cstr(path), { priority: true })).status;
+    return (await this.request(CMD.DELETE_FILE, cstr(await this.radioPath(path)), { priority: true })).status;
+  }
+
+  /** Creates a folder; its parent must exist (version 10). */
+  async createDirectory(path) {
+    if (this.protocol < 10) return STATUS.UNSUPPORTED;
+    return (await this.request(CMD.CREATE_DIRECTORY, cstr(await this.radioPath(path)), { priority: true })).status;
   }
 
   async loadModel(path) {
@@ -368,7 +449,7 @@ export class RadioClient extends EventTarget {
     return { status, trims };
   }
 
-  /** Raw channel outputs. Untested on a physical radio (see radio_remote.md). */
+  /** Mixer outputs, -1024 to 1024 for -100% to +100%. */
   async channelOutputs() {
     const { status, data } = await this.request(CMD.CHANNELS_OUTPUTS, u8(this.channels.length ? 0 : 1));
     if (status) return { status, channels: this.channels };
@@ -394,4 +475,27 @@ export function parseChannels(data, previous = []) {
     channels[i] = r.i16();
   }
   return channels;
+}
+
+/**
+ * EVENT.CONTROLS: switches count (1), positions (int8 each: -1 up, 0 middle, 1 down, -128 not installed),
+ * trims count (1), trims (int16 each), function switches count (1), states (1, bit i = FS(i + 1) on).
+ */
+export function parseControls(data) {
+  try {
+    const r = new Reader(data);
+    const switches = [];
+    for (let i = 0, count = r.u8(); i < count; i++) {
+      const position = r.i8();
+      if (position !== SWITCH_NOT_INSTALLED) switches.push({ name: `S${String.fromCharCode(65 + i)}`, position });
+    }
+    const trims = [];
+    for (let i = 0, count = r.u8(); i < count; i++) trims.push(Math.round(r.i16() * 100 / 256));
+    const count = r.u8();
+    const states = r.u8();
+    const functionSwitches = Array.from({ length: count }, (_, i) => !!(states & (1 << i)));
+    return { switches, trims, functionSwitches };
+  } catch {
+    return null; // truncated
+  }
 }

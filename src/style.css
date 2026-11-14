@@ -324,3 +324,22 @@ kbd {
 @media (max-width: 1100px) {
   .layout { grid-template-columns: minmax(0, 1fr) 300px; }
 }
+
+/* ----- Radio state, switches (protocol version 11) ----- */
+
+.radio-state { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.radio-state.warn { color: var(--warn); }
+.switches { display: flex; flex-wrap: wrap; gap: 6px; }
+.switch {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.switch:not([data-position="0"]) { color: var(--text); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.fswitches button.on { border-color: var(--ok); color: var(--ok); }
+button.small { padding: 1px 7px; font-size: 11px; margin-left: 6px; vertical-align: middle; }
+.files-bar.tools { margin-top: 0; }
+#newFolderForm { margin-bottom: 8px; }
