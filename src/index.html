@@ -34,6 +34,8 @@
         <label class="toggle"><input type="checkbox" id="liveToggle" checked> Live</label>
         <span class="muted" id="fps"></span>
         <span class="spacer"></span>
+        <span class="radio-state" id="radioState"></span>
+        <button id="wakeBtn" class="ghost" title="Turn the radio screen back on">Wake</button>
         <button id="copyShotBtn" class="ghost" disabled>Copy</button>
         <button id="saveShotBtn" class="ghost" disabled>Save PNG</button>
       </div>
@@ -88,7 +90,12 @@
         <h3>Trims</h3>
         <div class="trims" id="trims"></div>
 
-        <h3>Function switches</h3>
+        <div id="switchesSection" hidden>
+          <h3>Switches</h3>
+          <div class="switches" id="switches"></div>
+        </div>
+
+        <h3>Function switches <button id="fsResetBtn" class="ghost small" title="Turn all the function switches of the current model off">Reset</button></h3>
         <div class="fswitches" id="fswitches"></div>
 
         <h3>Type text</h3>
@@ -125,12 +132,22 @@
           <button id="filesUploadBtn" class="ghost">Upload</button>
           <input type="file" id="filesUploadInput" multiple hidden>
         </div>
+        <div class="files-bar tools">
+          <select id="driveSelect" title="Storage" hidden></select>
+          <button id="filesNewFolderBtn" class="ghost">New folder</button>
+          <span class="spacer"></span>
+          <button id="reloadBtn" class="ghost" title="Reload the Lua scripts on the radio, e.g. after uploading one">Reload Lua</button>
+        </div>
+        <form class="text-entry" id="newFolderForm" hidden>
+          <input id="newFolderName" placeholder="Folder name" autocomplete="off" maxlength="60">
+          <button type="submit">Create</button>
+        </form>
         <div class="progress" id="filesProgress" hidden><div></div></div>
         <ul class="file-list" id="fileList"></ul>
       </div>
 
       <div class="panel" data-panel="channels">
-        <p class="note">Experimental: channel outputs have not been tried on a physical radio yet. Values are raw (&plusmn;1024 is assumed to be &plusmn;100%).</p>
+        <p class="note">Mixer outputs of the radio, in percent.</p>
         <div class="channels" id="channels"></div>
       </div>
 

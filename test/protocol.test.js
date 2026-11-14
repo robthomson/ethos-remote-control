@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CMD, EVENT, FrameParser, RadioClient, Reader, buildFrame, concat, crc16, cstr, parseChannels, u16, u8,
+  CMD, EVENT, FrameParser, RadioClient, Reader, STATUS, buildFrame, concat, crc16, cstr, parseChannels, parseControls,
+  u16, u8,
 } from '../src/protocol.js';
 import { decodeQoi, decodeTiles } from '../src/qoi.js';
 
@@ -143,8 +144,10 @@ test('channel outputs keep unchanged channels', () => {
 // ---------- Client against a fake radio ----------
 
 class FakeRadio {
-  constructor({ prompt = true } = {}) {
+  constructor({ prompt = true, version = 6, volumes = false } = {}) {
     this.prompt = prompt;
+    this.version = version;
+    this.volumes = volumes;
     this.accepted = !prompt;
     this.received = [];
     this.parser = new FrameParser((command, seq, payload) => this.handle(command, seq, payload));
@@ -168,11 +171,14 @@ class FakeRadio {
   handle(command, seq, payload) {
     this.received.push({ command, payload });
     if (command === CMD.HELLO) {
-      return this.reply(command, seq, 0, concat(u8(6), u8(26), u8(1), u8(3), cstr('X20S'), cstr('EU'), cstr('abcdef12')));
+      const suffix = this.version >= 11 ? cstr('RC2') : new Uint8Array();
+      return this.reply(command, seq, 0, concat(u8(this.version), u8(26), u8(1), u8(3), cstr('X20S'), cstr('EU'), cstr('abcdef12'), suffix));
     }
     if (!this.accepted) return this.reply(command, seq, -2);
     if (command === CMD.TRIMS) return this.reply(command, seq, 0, concat(u16(256), u16(-128 & 0xFFFF), u16(0), u16(25600)));
     if (command === CMD.LIST_FILES) {
+      const path = new Reader(payload).string();
+      if (/^[A-Z]+:/.test(path) !== this.volumes) return this.reply(command, seq, -3);
       return this.reply(command, seq, 0, concat(u8(1), new Uint8Array(4), cstr('models'), u8(0), new Uint8Array([0x10, 0, 0, 0]), cstr('a.txt')));
     }
     if (command === CMD.SCREENSHOT) {
@@ -212,7 +218,7 @@ test('client connects after the radio accepts, then runs commands', async () => 
 
   assert.equal(await client.pressKey('SYS', 120), 0);
   const press = radio.received.at(-1);
-  assert.equal(press.command, CMD.PRESS_KEY);
+  assert.equal(press.command, CMD.PRESS);
   assert.deepEqual([...press.payload], [120, 0, 0, 0, ...new TextEncoder().encode('SYS'), 0]);
 
   assert.equal(await client.wheel(-2), 0);
@@ -241,4 +247,75 @@ test('Reader handles a string without terminator', () => {
   const r = new Reader(new TextEncoder().encode('abc'));
   assert.equal(r.string(), 'abc');
   assert.ok(r.atEnd());
+});
+
+const text = (payload, from = 0) => new Reader(payload.subarray(from)).string();
+
+test('protocol version 6: function switches and long touches use the old payloads', async () => {
+  const radio = new FakeRadio({ prompt: false });
+  const client = new RadioClient(radio.transport);
+  await client.connect();
+
+  await client.pressFunctionSwitch(2, 100);
+  assert.equal(radio.received.at(-1).command, CMD.PRESS_FUNCTION_SWITCH);
+  await client.touch(10, 20, 1000);
+  assert.deepEqual([...radio.received.at(-1).payload], [10, 0, 20, 0, 1]);
+  await client.touch(10, 20);
+  assert.deepEqual([...radio.received.at(-1).payload], [10, 0, 20, 0, 0]);
+
+  const sent = radio.received.length;
+  assert.equal(await client.createDirectory('/scripts/new'), STATUS.UNSUPPORTED);
+  assert.equal(await client.reload(), STATUS.UNSUPPORTED);
+  assert.equal(await client.resetFunctionSwitches(), STATUS.UNSUPPORTED);
+  assert.equal(radio.received.length, sent);
+
+  // No volumes: paths are sent as they are
+  await client.deleteFile('/scripts/a.lua');
+  assert.equal(text(radio.received.at(-1).payload), '/scripts/a.lua');
+  assert.deepEqual(await client.drives(), [{ name: 'Radio', path: '/' }]);
+});
+
+test('protocol version 11: new payloads, commands, volumes and events', async () => {
+  const radio = new FakeRadio({ prompt: false, version: 11, volumes: true });
+  const client = new RadioClient(radio.transport);
+  const hello = await client.connect();
+  assert.equal(radio.received[0].payload[0], 11);
+  assert.equal(hello.firmware, '26.1.3-RC2');
+
+  await client.pressFunctionSwitch(2, 100);
+  assert.equal(radio.received.at(-1).command, CMD.PRESS);
+  assert.equal(text(radio.received.at(-1).payload, 4), 'FS2');
+  await client.touch(10, 20, 1000);
+  assert.deepEqual([...radio.received.at(-1).payload], [10, 0, 20, 0, 0xE8, 3, 0, 0]);
+
+  assert.equal(await client.createDirectory('/scripts/new'), 0);
+  assert.equal(radio.received.at(-1).command, CMD.CREATE_DIRECTORY);
+  assert.equal(text(radio.received.at(-1).payload), 'RADIO:/scripts/new');
+  await client.deleteFile('SD:/logs/a.csv');
+  assert.equal(text(radio.received.at(-1).payload), 'SD:/logs/a.csv');
+  assert.deepEqual(await client.drives(), [{ name: 'Radio', path: '/' }, { name: 'SD card', path: 'SD:/' }]);
+
+  assert.equal(await client.reload('scripts'), 0);
+  assert.deepEqual([radio.received.at(-1).command, ...radio.received.at(-1).payload], [CMD.RELOAD, 1]);
+  assert.equal(await client.resetFunctionSwitches(), 0);
+  assert.equal(radio.received.at(-1).command, CMD.RESET_FUNCTION_SWITCHES);
+
+  const events = [];
+  client.addEventListener('state', (e) => events.push(e.detail));
+  client.addEventListener('controls', (e) => events.push(e.detail));
+  radio.event(EVENT.STATE, new Uint8Array([2, 1, 0]));
+  radio.event(EVENT.CONTROLS, concat(u8(3), new Uint8Array([0xFF, 0x80, 1]), u8(2), u16(256), u16(-128 & 0xFFFF), u8(6), u8(0b100001)));
+  assert.deepEqual(events, [
+    { flightMode: 2, rfActive: true, backlightOn: false },
+    {
+      switches: [{ name: 'SA', position: -1 }, { name: 'SC', position: 1 }],
+      trims: [100, -50],
+      functionSwitches: [true, false, false, false, false, true],
+    },
+  ]);
+  assert.equal(client.controls, events[1]);
+});
+
+test('truncated controls are ignored', () => {
+  assert.equal(parseControls(new Uint8Array([2, 0])), null);
 });
